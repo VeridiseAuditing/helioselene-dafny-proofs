@@ -423,7 +423,7 @@ module FieldInvert {
   // First fragment of Rust `fn step`: parity mask, `a - b` chain, and
   // the a_lt_b / both masks. Produces the per-limb a_sub_b words
   // (asb0..asb3) so a subsequent cond-neg chain can derive |a - b|.
-  method {:timeLimit 180} invert_step_ct_masks(a: U256, b: U256)
+  method {:rlimit 2000000} invert_step_ct_masks(a: U256, b: U256)
     returns (
       a_is_odd: Limb, a_lt_b: Limb,
       both: Limb,
