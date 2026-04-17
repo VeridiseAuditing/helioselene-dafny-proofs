@@ -1,0 +1,10 @@
+includes = [
+  "src/**/*.dfy",
+  "specs/**/*.dfy",
+  "tests/**/*.dfy",
+]
+
+
+# Used to specify additional options for the Dafny server
+[options]
+standard-libraries = true

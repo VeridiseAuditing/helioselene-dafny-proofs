@@ -1,0 +1,43 @@
+name: Dafny CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  dafny:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      # NOTE (CI-003): Ideally pin to Dafny 4.11.0 + z3 4.15.4, but Homebrew
+      # version pinning for Dafny is impractical. brew install works reliably.
+      - name: "Install Dafny"
+        run: |
+          brew update
+          brew install dafny
+          dafny --version
+      - name: Verify Dafny
+        run: |
+          dafny verify dfyconfig.toml \
+            --standard-libraries \
+            --progress Batch \
+            --log-format csv \
+            --verification-time-limit 240 \
+            --log-format "csv;LogFileName=dafny-report.csv" \
+            --allow-warnings
+      - name: Upload Dafny CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dafny-csv-report
+          path: dafny-report.csv
+      - name: Build Dafny
+        run: |
+          dafny build dfyconfig.toml \
+            --standard-libraries \
+            --no-verify \
+            --allow-warnings
