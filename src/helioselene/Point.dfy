@@ -40,6 +40,7 @@ module HelioselenePoint {
   import opened CryptoBigint_0_5_5_U256
   import opened HelioseleneFieldMod
   import opened FieldBase
+  import DivMod = Std.Arithmetic.DivMod
 
   // ===================================================================
   // FIELD25519: ABSTRACT MODEL
@@ -249,19 +250,63 @@ module HelioselenePoint {
     ensures CurveEquationLHS(HELIOS_G_Y_VALUE, 1) == CurveEquationRHS(1, 1)
   {}
 
+  // Modular arithmetic bridging lemmas, thin wrappers around Std.Arithmetic.DivMod.
+  // The stdlib proofs are stable; prior hand-rolled nonlinear proofs were flaky in CI.
+  lemma ModAddCompatLemma(a: int, b: int, p: int)
+    requires p > 0
+    ensures ((a % p) + (b % p)) % p == (a + b) % p
+  {
+    DivMod.LemmaAddModNoop(a, b, p);
+  }
+
+  lemma ModMulCompatLemma(a: int, b: int, p: int)
+    requires p > 0
+    ensures ((a % p) * (b % p)) % p == (a * b) % p
+  {
+    DivMod.LemmaMulModNoopGeneral(a, b, p);
+  }
+
+  lemma ModSubCompatLemma(a: int, b: int, p: int)
+    requires p > 0
+    ensures ((a % p) - (b % p) + p) % p == (a - b + p) % p
+  {
+    DivMod.LemmaSubModNoop(a, b, p);
+    DivMod.LemmaAddModNoop(a - b, p, p);
+    assert p % p == 0;
+  }
+
+  // (p - y) % p ≡ -y (mod p).  Structured so Z3 only sees small-constant reasoning
+  // via the stdlib ModNoop lemmas.
   lemma NegateYPreservesCurveLHSLemma(y: int, z: int)
     requires 0 <= y < F25519_MOD
     ensures CurveEquationLHS((F25519_MOD - y) % F25519_MOD, z) == CurveEquationLHS(y, z)
   {
-    if y == 0 {
-    } else {
-      assert (F25519_MOD - y) % F25519_MOD == F25519_MOD - y;
-      var lhs := (F25519_MOD - y) * (F25519_MOD - y) * z;
-      var rhs := y * y * z;
-      assert lhs - rhs == F25519_MOD * z * (F25519_MOD - 2 * y);
-      assert lhs == rhs + F25519_MOD * z * (F25519_MOD - 2 * y);
-      assert lhs % F25519_MOD == rhs % F25519_MOD;
+    var p := F25519_MOD;
+    var ny := (p - y) % p;
+    // Step 1: ny * ny ≡ y * y (mod p).
+    assert (ny * ny) % p == (y * y) % p by {
+      // ny ≡ -y (mod p): (ny + y) is a multiple of p.
+      if y == 0 {
+        assert ny == 0;
+      } else {
+        assert ny == p - y;
+        assert ny + y == p;
+      }
+      // From ny ≡ -y: ny * ny ≡ (-y) * (-y) == y * y (mod p).
+      DivMod.LemmaMulModNoopGeneral(ny, ny, p);
+      DivMod.LemmaMulModNoopGeneral(y, y, p);
+      // Bridge: (ny * ny - y * y) = (ny - y)(ny + y); when y != 0, ny + y == p, so divisible by p.
+      // When y == 0, ny == 0 and both sides are 0.
+      if y != 0 {
+        assert ny * ny - y * y == (ny - y) * (ny + y);
+        assert ny + y == p;
+        assert ny * ny - y * y == (ny - y) * p;
+      }
     }
+    // Step 2: multiply both sides by z modulo p via LemmaMulModNoopLeft.
+    DivMod.LemmaMulModNoopLeft(ny * ny, z, p);
+    DivMod.LemmaMulModNoopLeft(y * y, z, p);
+    assert (ny * ny * z) % p == (y * y * z) % p;
   }
 
   lemma PointNegOnCurveLemma(X: int, Y: int, Z: int)
@@ -270,31 +315,6 @@ module HelioselenePoint {
     ensures CurveEquationLHS((F25519_MOD - Y) % F25519_MOD, Z) == CurveEquationRHS(X, Z)
   {
     NegateYPreservesCurveLHSLemma(Y, Z);
-  }
-
-  lemma ModAddCompatLemma(a: int, b: int, p: int)
-    requires p > 0
-    ensures ((a % p) + (b % p)) % p == (a + b) % p
-  {
-    assert a == (a / p) * p + a % p;
-    assert b == (b / p) * p + b % p;
-    assert a + b == (a / p + b / p) * p + (a % p + b % p);
-  }
-
-  lemma ModMulCompatLemma(a: int, b: int, p: int)
-    requires p > 0
-    ensures ((a % p) * (b % p)) % p == (a * b) % p
-  {
-    assert a == (a / p) * p + a % p;
-    assert b == (b / p) * p + b % p;
-    assert a * b
-      == (a / p) * (b / p) * p * p
-       + (a / p) * p * (b % p)
-       + (b / p) * p * (a % p)
-       + (a % p) * (b % p);
-    assert a * b
-      == p * ((a / p) * (b / p) * p + (a / p) * (b % p) + (b / p) * (a % p))
-         + (a % p) * (b % p);
   }
 
   // ===================================================================
@@ -505,7 +525,7 @@ module HelioselenePoint {
   // from_xy: create a point from affine coordinates, checking OnCurve
   // original code: from_xy(x, y) -> CtOption<Self>
   // Returns (valid, P): if valid, P is on the curve with affine coords (x, y).
-  method {:isolate_assertions} {:timeLimit 240} point_from_xy(x: Field25519, y: Field25519)
+  method {:isolate_assertions} {:timeLimit 60} point_from_xy(x: Field25519, y: Field25519)
     returns (valid: bool, P: HeliosPoint)
     requires x.Valid()
     requires y.Valid()
@@ -531,18 +551,30 @@ module HelioselenePoint {
     assert ValidPoint(P);
     assert y_sq.value == (y.value * y.value) % F25519_MOD;
     assert x_sq.value == (x.value * x.value) % F25519_MOD;
+    // Bridge: x is Valid so x.value mod p == x.value.  Makes the stdlib ModNoop
+    // lemmas directly applicable to the raw multiplications/additions below.
+    assert x.value % F25519_MOD == x.value;
     ModMulCompatLemma(x.value * x.value, x.value, F25519_MOD);
     assert x_cu.value == (x.value * x.value * x.value) % F25519_MOD;
     assert three_x.value == (2 * x.value) % F25519_MOD;
     ModAddCompatLemma(2 * x.value, x.value, F25519_MOD);
     assert three_x_2.value == (3 * x.value) % F25519_MOD;
+    ModSubCompatLemma(x.value * x.value * x.value, 3 * x.value, F25519_MOD);
     assert rhs_no_b.value == (x.value * x.value * x.value - 3 * x.value + F25519_MOD) % F25519_MOD;
     ModAddCompatLemma(x.value * x.value * x.value - 3 * x.value + F25519_MOD, HELIOS_B_VALUE, F25519_MOD);
     assert rhs.value == (x.value * x.value * x.value - 3 * x.value + HELIOS_B_VALUE + F25519_MOD) % F25519_MOD;
+    // Bridge: (poly + k*p) % p is independent of k; needed for the !valid
+    // postcondition (which is phrased with + F25519_MOD * 4) and for comparing
+    // rhs.value to CurveEquationRHS (which has no + p term).
+    ghost var poly := x.value * x.value * x.value - 3 * x.value + HELIOS_B_VALUE;
+    DivMod.LemmaModMultiplesVanish(1, poly, F25519_MOD);
+    DivMod.LemmaModMultiplesVanish(4, poly, F25519_MOD);
+    assert (poly + F25519_MOD) % F25519_MOD == poly % F25519_MOD;
+    assert (poly + F25519_MOD * 4) % F25519_MOD == poly % F25519_MOD;
     if valid {
       assert y_sq.value == rhs.value;
       assert CurveEquationLHS(P.y.value, P.z.value) == (y.value * y.value) % F25519_MOD;
-      assert CurveEquationRHS(P.x.value, P.z.value) == (x.value * x.value * x.value - 3 * x.value + HELIOS_B_VALUE + F25519_MOD) % F25519_MOD;
+      assert CurveEquationRHS(P.x.value, P.z.value) == poly % F25519_MOD;
       assert OnCurve(P);
     } else {
       assert y_sq.value != rhs.value;
